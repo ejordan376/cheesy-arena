@@ -20,6 +20,7 @@ type ArenaNotifiers struct {
 	ArenaStatusNotifier                *websocket.Notifier
 	AudienceDisplayModeNotifier        *websocket.Notifier
 	DisplayConfigurationNotifier       *websocket.Notifier
+	EventStatusNotifier                *websocket.Notifier
 	LowerThirdNotifier                 *websocket.Notifier
 	MatchLoadNotifier                  *websocket.Notifier
 	MatchTimeNotifier                  *websocket.Notifier
@@ -29,11 +30,7 @@ type ArenaNotifiers struct {
 	ReloadDisplaysNotifier             *websocket.Notifier
 	ScorePostedNotifier                *websocket.Notifier
 	ScoringStatusNotifier              *websocket.Notifier
-}
-
-type DisplayConfigurationMessage struct {
-	Displays    map[string]*Display
-	DisplayUrls map[string]string
+	ControlPanelColorNotifier          *websocket.Notifier
 }
 
 type MatchTimeMessage struct {
@@ -42,9 +39,8 @@ type MatchTimeMessage struct {
 }
 
 type audienceAllianceScoreFields struct {
-	Score                *game.Score
-	ScoreSummary         *game.ScoreSummary
-	IsPreMatchScoreReady bool
+	Score        *game.Score
+	ScoreSummary *game.ScoreSummary
 }
 
 // Instantiates notifiers and configures their message producing methods.
@@ -57,6 +53,7 @@ func (arena *Arena) configureNotifiers() {
 		arena.generateAudienceDisplayModeMessage)
 	arena.DisplayConfigurationNotifier = websocket.NewNotifier("displayConfiguration",
 		arena.generateDisplayConfigurationMessage)
+	arena.EventStatusNotifier = websocket.NewNotifier("eventStatus", arena.generateEventStatusMessage)
 	arena.LowerThirdNotifier = websocket.NewNotifier("lowerThird", arena.generateLowerThirdMessage)
 	arena.MatchLoadNotifier = websocket.NewNotifier("matchLoad", arena.generateMatchLoadMessage)
 	arena.MatchTimeNotifier = websocket.NewNotifier("matchTime", arena.generateMatchTimeMessage)
@@ -66,6 +63,7 @@ func (arena *Arena) configureNotifiers() {
 	arena.ReloadDisplaysNotifier = websocket.NewNotifier("reload", nil)
 	arena.ScorePostedNotifier = websocket.NewNotifier("scorePosted", arena.generateScorePostedMessage)
 	arena.ScoringStatusNotifier = websocket.NewNotifier("scoringStatus", arena.generateScoringStatusMessage)
+	arena.ControlPanelColorNotifier = websocket.NewNotifier("controlPanelColor", arena.generateControlPanelColorMessage)
 }
 
 func (arena *Arena) generateAllianceSelectionMessage() interface{} {
@@ -92,11 +90,10 @@ func (arena *Arena) generateArenaStatusMessage() interface{} {
 		AllianceStations map[string]*AllianceStation
 		TeamWifiStatuses map[string]network.TeamWifiStatus
 		MatchState
-		BypassPreMatchScore bool
-		CanStartMatch       bool
-		PlcIsHealthy        bool
-		FieldEstop          bool
-	}{arena.CurrentMatch.Id, arena.AllianceStations, teamWifiStatuses, arena.MatchState, arena.BypassPreMatchScore,
+		CanStartMatch bool
+		PlcIsHealthy  bool
+		FieldEstop    bool
+	}{arena.CurrentMatch.Id, arena.AllianceStations, teamWifiStatuses, arena.MatchState,
 		arena.checkCanStartMatch() == nil, arena.Plc.IsHealthy, arena.Plc.GetFieldEstop()}
 }
 
@@ -105,20 +102,25 @@ func (arena *Arena) generateAudienceDisplayModeMessage() interface{} {
 }
 
 func (arena *Arena) generateDisplayConfigurationMessage() interface{} {
+	// Notify() for this notifier must always called from a method that has a lock on the display mutex.
 	// Make a copy of the map to avoid potential data races; otherwise the same map would get iterated through as it is
-	// serialized to JSON.
-	displaysCopy := make(map[string]*Display)
-	displayUrls := make(map[string]string)
+	// serialized to JSON, outside the mutex lock.
+	displaysCopy := make(map[string]Display)
 	for displayId, display := range arena.Displays {
-		displaysCopy[displayId] = display
-		displayUrls[displayId] = display.ToUrl()
+		displaysCopy[displayId] = *display
 	}
+	return displaysCopy
+}
 
-	return &DisplayConfigurationMessage{displaysCopy, displayUrls}
+func (arena *Arena) generateEventStatusMessage() interface{} {
+	return arena.EventStatus
 }
 
 func (arena *Arena) generateLowerThirdMessage() interface{} {
-	return arena.LowerThird
+	return &struct {
+		LowerThird     *model.LowerThird
+		ShowLowerThird bool
+	}{arena.LowerThird, arena.ShowLowerThird}
 }
 
 func (arena *Arena) generateMatchLoadMessage() interface{} {
@@ -170,9 +172,9 @@ func (arena *Arena) generateScorePostedMessage() interface{} {
 		matches, _ := arena.Database.GetMatchesByElimRoundGroup(arena.SavedMatch.ElimRound, arena.SavedMatch.ElimGroup)
 		var redWins, blueWins int
 		for _, match := range matches {
-			if match.Winner == "R" {
+			if match.Status == model.RedWonMatch {
 				redWins++
-			} else if match.Winner == "B" {
+			} else if match.Status == model.BlueWonMatch {
 				blueWins++
 			}
 		}
@@ -194,21 +196,29 @@ func (arena *Arena) generateScorePostedMessage() interface{} {
 		}
 	}
 
+	rankings := make(map[int]game.Ranking, len(arena.SavedRankings))
+	for _, ranking := range arena.SavedRankings {
+		rankings[ranking.TeamId] = ranking
+	}
+
 	return &struct {
 		MatchType        string
 		Match            *model.Match
 		RedScoreSummary  *game.ScoreSummary
 		BlueScoreSummary *game.ScoreSummary
+		Rankings         map[int]game.Ranking
 		RedFouls         []game.Foul
 		BlueFouls        []game.Foul
+		RulesViolated    map[int]*game.Rule
 		RedCards         map[string]string
 		BlueCards        map[string]string
 		SeriesStatus     string
 		SeriesLeader     string
-	}{arena.SavedMatch.CapitalizedType(), arena.SavedMatch, arena.SavedMatchResult.RedScoreSummary(),
-		arena.SavedMatchResult.BlueScoreSummary(), populateFoulDescriptions(arena.SavedMatchResult.RedScore.Fouls),
-		populateFoulDescriptions(arena.SavedMatchResult.BlueScore.Fouls), arena.SavedMatchResult.RedCards,
-		arena.SavedMatchResult.BlueCards, seriesStatus, seriesLeader}
+	}{arena.SavedMatch.CapitalizedType(), arena.SavedMatch, arena.SavedMatchResult.RedScoreSummary(true),
+		arena.SavedMatchResult.BlueScoreSummary(true), rankings, arena.SavedMatchResult.RedScore.Fouls,
+		arena.SavedMatchResult.BlueScore.Fouls,
+		getRulesViolated(arena.SavedMatchResult.RedScore.Fouls, arena.SavedMatchResult.BlueScore.Fouls),
+		arena.SavedMatchResult.RedCards, arena.SavedMatchResult.BlueCards, seriesStatus, seriesLeader}
 }
 
 func (arena *Arena) generateScoringStatusMessage() interface{} {
@@ -226,27 +236,30 @@ func (arena *Arena) generateScoringStatusMessage() interface{} {
 		arena.ScoringPanelRegistry.GetNumPanels("blue"), arena.ScoringPanelRegistry.GetNumScoreCommitted("blue")}
 }
 
+func (arena *Arena) generateControlPanelColorMessage() interface{} {
+	return &struct {
+		RedControlPanelColor  game.ControlPanelColor
+		BlueControlPanelColor game.ControlPanelColor
+	}{arena.RedControlPanel.CurrentColor, arena.BlueControlPanel.CurrentColor}
+}
+
 // Constructs the data object for one alliance sent to the audience display for the realtime scoring overlay.
 func getAudienceAllianceScoreFields(allianceScore *RealtimeScore,
 	allianceScoreSummary *game.ScoreSummary) *audienceAllianceScoreFields {
 	fields := new(audienceAllianceScoreFields)
 	fields.Score = &allianceScore.CurrentScore
 	fields.ScoreSummary = allianceScoreSummary
-	fields.IsPreMatchScoreReady = allianceScore.CurrentScore.IsValidPreMatch()
 	return fields
 }
 
-// Copy the description from the rules to the fouls so that they are available to the announcer.
-func populateFoulDescriptions(fouls []game.Foul) []game.Foul {
-	foulsCopy := make([]game.Foul, len(fouls))
-	copy(foulsCopy, fouls)
-	for i := range foulsCopy {
-		for _, rule := range game.Rules {
-			if foulsCopy[i].RuleNumber == rule.RuleNumber {
-				foulsCopy[i].Description = rule.Description
-				break
-			}
-		}
+// Produce a map of rules that were violated by either alliance so that they are available to the announcer.
+func getRulesViolated(redFouls, blueFouls []game.Foul) map[int]*game.Rule {
+	rules := make(map[int]*game.Rule)
+	for _, foul := range redFouls {
+		rules[foul.RuleId] = game.GetRuleById(foul.RuleId)
 	}
-	return foulsCopy
+	for _, foul := range blueFouls {
+		rules[foul.RuleId] = game.GetRuleById(foul.RuleId)
+	}
+	return rules
 }

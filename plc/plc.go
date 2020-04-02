@@ -74,16 +74,6 @@ const (
 	stackLightBlue
 	stackLightBuzzer
 	fieldResetLight
-	cargoShipMagnetRed
-	cargoShipMagnetBlue
-	cargoShipLightRed
-	cargoShipLightBlue
-	sandstormUpRed
-	sandstormUpBlue
-	rocketLightRedNear
-	rocketLightRedFar
-	rocketLightBlueNear
-	rocketLightBlueFar
 	coilCount
 )
 
@@ -97,18 +87,23 @@ func (plc *Plc) SetAddress(address string) {
 	}
 }
 
+// Returns true if the PLC is enabled in the configurations.
+func (plc *Plc) IsEnabled() bool {
+	return plc.address != ""
+}
+
 // Loops indefinitely to read inputs from and write outputs to PLC.
 func (plc *Plc) Run() {
 	for {
 		if plc.handler == nil {
-			if plc.address == "" {
+			if !plc.IsEnabled() {
 				// No PLC is configured; just allow the loop to continue to simulate inputs and outputs.
 				plc.IsHealthy = false
 			} else {
 				err := plc.connect()
 				if err != nil {
 					log.Printf("PLC error: %v", err)
-					//time.Sleep(time.Second * plcRetryIntevalSec)
+					time.Sleep(time.Second * plcRetryIntevalSec)
 					plc.IsHealthy = false
 					continue
 				}
@@ -147,13 +142,13 @@ func (plc *Plc) Run() {
 
 // Returns the state of the field emergency stop button (true if e-stop is active).
 func (plc *Plc) GetFieldEstop() bool {
-	return plc.address != "" && !plc.inputs[fieldEstop]
+	return plc.IsEnabled() && !plc.inputs[fieldEstop]
 }
 
 // Returns the state of the red and blue driver station emergency stop buttons (true if e-stop is active).
 func (plc *Plc) GetTeamEstops() ([3]bool, [3]bool) {
 	var redEstops, blueEstops [3]bool
-	if plc.address != "" {
+	if plc.IsEnabled() {
 		redEstops[0] = !plc.inputs[redEstop1]
 		redEstops[1] = !plc.inputs[redEstop2]
 		redEstops[2] = !plc.inputs[redEstop3]
@@ -162,6 +157,20 @@ func (plc *Plc) GetTeamEstops() ([3]bool, [3]bool) {
 		blueEstops[2] = !plc.inputs[blueEstop3]
 	}
 	return redEstops, blueEstops
+}
+
+// Returns whether anything is connected to each station's designated Ethernet port on the SCC.
+func (plc *Plc) GetEthernetConnected() ([3]bool, [3]bool) {
+	return [3]bool{
+			plc.inputs[redConnected1],
+			plc.inputs[redConnected2],
+			plc.inputs[redConnected3],
+		},
+		[3]bool{
+			plc.inputs[blueConnected1],
+			plc.inputs[blueConnected2],
+			plc.inputs[blueConnected3],
+		}
 }
 
 // Set the on/off state of the stack lights on the scoring table.
@@ -179,28 +188,6 @@ func (plc *Plc) SetStackBuzzer(state bool) {
 
 func (plc *Plc) SetFieldResetLight(state bool) {
 	plc.coils[fieldResetLight] = state
-}
-
-func (plc *Plc) SetSandstormUp(state bool) {
-	plc.coils[sandstormUpRed] = state
-	plc.coils[sandstormUpBlue] = state
-}
-
-func (plc *Plc) SetCargoShipLights(state bool) {
-	plc.coils[cargoShipLightRed] = state
-	plc.coils[cargoShipLightBlue] = state
-}
-
-func (plc *Plc) SetCargoShipMagnets(state bool) {
-	plc.coils[cargoShipMagnetRed] = state
-	plc.coils[cargoShipMagnetBlue] = state
-}
-
-func (plc *Plc) SetRocketLights(red, blue bool) {
-	plc.coils[rocketLightRedNear] = red
-	plc.coils[rocketLightRedFar] = red
-	plc.coils[rocketLightBlueNear] = blue
-	plc.coils[rocketLightBlueFar] = blue
 }
 
 func (plc *Plc) GetCycleState(max, index, duration int) bool {
